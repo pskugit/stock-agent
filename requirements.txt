@@ -1,0 +1,6 @@
+openai
+yfinance
+python-dotenv
+faiss
+requests
+tinydb
