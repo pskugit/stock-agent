@@ -29,7 +29,19 @@ class Transaction:
             'comment': self.comment
         }
 
-
+    @classmethod
+    def from_dict(cls, data):
+        """Creates a Transaction instance from a dictionary."""
+        return cls(
+            transaction_type=data['type'],
+            symbol=data['symbol'],
+            price=data['price'],
+            quantity=data['quantity'],
+            cash_after_transaction=data['cash_after_transaction'],
+            comment=data.get('comment', ""),
+            time=datetime.strptime(data['time'], '%Y-%m-%d %H:%M:%S') if isinstance(data['time'], str) else data['time']
+        )
+        
     def __str__(self):
         """Return a human-readable string representation of the transaction."""
         return f"Time: {self.time.strftime('%Y-%m-%d %H:%M:%S')} | Action: {self.transaction_type.upper()} {self.symbol} @ {self.price:.2f} EUR x {self.quantity:.4f} shares | Cash after: {self.cash_after_transaction:.2f} | Comment: {self.comment})"
@@ -62,6 +74,14 @@ class TransactionHistory:
         self.history.append(transaction)
         return transaction
 
+    def to_dict(self):
+        return {"history": [tx.dict() for tx in self.history]}
+
+    @classmethod
+    def from_dict(cls, data):
+        history = [Transaction(**tx) for tx in data.get("history", [])]
+        return cls(history=history)
+    
     def get_history(self, formatted: bool = True):
         """Returns the transaction history. Optionally formats the timestamps."""
         return [tx.to_dict(formatted) for tx in self.history]
@@ -147,6 +167,7 @@ class Portfolio:
                 "initial_cash": core_schema.float_schema(),
                 "total_cash": core_schema.float_schema(),
                 "positions": core_schema.dict_schema(),
+                "transaction_history": core_schema.list_schema(core_schema.dict_schema()),  # Transactions stored as a list of dicts
                 "portfolio_value": core_schema.float_schema(),
                 "absolute_change_since_start": core_schema.float_schema(),
                 "relative_change_since_start": core_schema.float_schema(),
@@ -287,111 +308,54 @@ class Portfolio:
         return header + (positions_str if positions_str else "No active positions")
 
     
-    def to_json(self, filepath: str = None) -> str:
-        """
-        Serialize the portfolio state to JSON format.
-        If filepath is provided, saves to file. Otherwise returns JSON string.
-        """
-        def convert_transaction(tx):
-            """Helper to convert transaction datetime to string"""
-            tx_dict = tx.copy()
-            if isinstance(tx_dict['time'], datetime):
-                tx_dict['time'] = tx_dict['time'].isoformat()
-            return tx_dict
-
-        portfolio_state = {
-            'initial_cash': self.initial_cash,
-            'total_cash': self.total_cash,
-            'portfolio_value': self.portfolio_value,
-            'absolute_change_since_start': self.absolute_change_since_start,
-            'relative_change_since_start': self.relative_change_since_start,
-            'absolute_change_since_update': self.absolute_change_since_update,
-            'relative_change_since_update': self.relative_change_since_update,
-            'last_update_time': self.last_update_time.isoformat(),
-            'positions': {
-                symbol: {
-                    'symbol': pos.symbol,
-                    'buy_price': pos.buy_price,
-                    'quantity': pos.quantity,
-                    'position_value': pos.position_value,
-                    'last_update_price': pos.last_update_price,
-                    'absolute_change_since_start': pos.absolute_change_since_start,
-                    'relative_change_since_start': pos.relative_change_since_start,
-                    'absolute_change_since_update': pos.absolute_change_since_update,
-                    'relative_change_since_update': pos.relative_change_since_update,
-                    'last_update_time': pos.last_update_time.isoformat()
-                } for symbol, pos in self.positions.items()
-            },
-            'transaction_history': [convert_transaction(tx) for tx in self.transaction_history.get_history(formatted=False)]
+    def to_dict(self):
+        """Converts the Portfolio to a dictionary format."""
+        return {
+            "initial_cash": self.initial_cash,
+            "total_cash": self.total_cash,
+            "positions": {symbol: vars(pos) for symbol, pos in self.positions.items()},  # Assuming Position class
+            "portfolio_value": self.portfolio_value,
+            "absolute_change_since_start": self.absolute_change_since_start,
+            "relative_change_since_start": self.relative_change_since_start,
+            "absolute_change_since_update": self.absolute_change_since_update,
+            "relative_change_since_update": self.relative_change_since_update,
+            "last_update_time": self.last_update_time.isoformat(),
+            "transaction_history": self.transaction_history.to_dict(),  # Converts transaction history to dict
         }
+
+    @classmethod
+    def from_dict(cls, data):
+        """Reconstructs a Portfolio instance from a dictionary."""
+        portfolio = cls(data["initial_cash"])
+        portfolio.total_cash = data["total_cash"]
+        portfolio.positions = data["positions"]  # This may need a `Position.from_dict`
+        portfolio.portfolio_value = data["portfolio_value"]
+        portfolio.absolute_change_since_start = data["absolute_change_since_start"]
+        portfolio.relative_change_since_start = data["relative_change_since_start"]
+        portfolio.absolute_change_since_update = data["absolute_change_since_update"]
+        portfolio.relative_change_since_update = data["relative_change_since_update"]
+        portfolio.last_update_time = datetime.fromisoformat(data["last_update_time"])
+        portfolio.transaction_history = TransactionHistory.from_dict(data["transaction_history"])
+        return portfolio
+    
+    def to_json(self, filepath: str = None) -> str:
+        """Serializes the Portfolio to a JSON string or saves it to a file."""
+        json_data = json.dumps(self.to_dict(), indent=2)
         
         if filepath:
             with open(filepath, 'w') as f:
-                json.dump(portfolio_state, f, indent=2)
+                f.write(json_data)
             return filepath
         
-        return json.dumps(portfolio_state, indent=2)
-    
+        return json_data
+
     @classmethod
     def from_json(cls, json_input: str) -> 'Portfolio':
-        """
-        Create a Portfolio instance from JSON data.
-        json_input can be either a file path or a JSON string.
-        """
-        # Check if input is a filepath (ends with .json)
-        if isinstance(json_input, str) and json_input.lower().endswith('.json'):
-            if not os.path.exists(json_input):
-                raise FileNotFoundError(f"JSON file not found: {json_input}")
+        """Deserializes Portfolio from a JSON string or file."""
+        if os.path.exists(json_input):
             with open(json_input, 'r') as f:
                 data = json.load(f)
         else:
-            # Treat as JSON string
-            try:
-                data = json.loads(json_input)
-            except json.JSONDecodeError as e:
-                raise ValueError(f"Invalid JSON string provided: {str(e)}")
+            data = json.loads(json_input)
         
-        # Create new portfolio instance
-        portfolio = cls(data['initial_cash'])
-        
-        # Restore portfolio state
-        portfolio.total_cash = data['total_cash']
-        portfolio.portfolio_value = data['portfolio_value']
-        portfolio.absolute_change_since_start = data['absolute_change_since_start']
-        portfolio.relative_change_since_start = data['relative_change_since_start']
-        portfolio.absolute_change_since_update = data['absolute_change_since_update']
-        portfolio.relative_change_since_update = data['relative_change_since_update']
-        portfolio.last_update_time = datetime.fromisoformat(data['last_update_time'])
-        
-        # Restore positions
-        for symbol, pos_data in data['positions'].items():
-            position = Position(
-                symbol=pos_data['symbol'],
-                price=pos_data['buy_price'],
-                quantity=pos_data['quantity']
-            )
-            position.position_value = pos_data['position_value']
-            position.last_update_price = pos_data['last_update_price']
-            position.absolute_change_since_start = pos_data['absolute_change_since_start']
-            position.relative_change_since_start = pos_data['relative_change_since_start']
-            position.absolute_change_since_update = pos_data['absolute_change_since_update']
-            position.relative_change_since_update = pos_data['relative_change_since_update']
-            position.last_update_time = datetime.fromisoformat(pos_data['last_update_time'])
-            portfolio.positions[symbol] = position
-        
-        # Restore transaction history
-        for tx in data['transaction_history']:
-            # Convert ISO format string back to datetime before creating transaction
-            tx_time = datetime.fromisoformat(tx['time'])
-            portfolio.transaction_history.log(
-                transaction_type=tx['type'],
-                symbol=tx['symbol'],
-                price=tx['price'],
-                quantity=tx['quantity'],
-                cash_after_transaction=tx['cash_after_transaction'],
-                comment=tx['comment']
-            )
-            # Update the transaction time to match the original
-            portfolio.transaction_history.history[-1].time = tx_time
-        
-        return portfolio
+        return cls.from_dict(data)
