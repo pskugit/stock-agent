@@ -21,7 +21,7 @@ class MemoryController:
         episode_dict = json.loads(episode.model_dump_json())
         self.current_episode_store.insert(episode_dict)
 
-    def save_episode(self, episode, remove_current=False):
+    def save_finished_episode(self, episode, remove_current=True):
         """Finalize the current episode by moving it to the main memory index and generating an embedding."""
         # Save the finalized episode to the main memory index
         episode_id = self.memory_index.save_episode(episode)
@@ -33,20 +33,22 @@ class MemoryController:
         # Save the embedding to the embeddings store
         self.embeddings_store.save_embedding(embedding, episode_id)
         
-        # Remove the episode from the current_episode_store using its unique_id
+        # Remove all episodes from the current_episode_store using truncate
         if remove_current:
-            self.current_episode_store.remove(Query().unique_id == episode.unique_id)
+            self.current_episode_store.truncate() #remove(Query().unique_id == episode.unique_id)
 
     def get_current_episode(self):
         """Retrieve the current (incomplete) episode."""
         current_episode_dict = self.current_episode_store.all()
         if current_episode_dict:
-            return Episode.model_validate(current_episode_dict[0])  # Deserialize the dictionary back into an Episode object
+            return Episode.model_validate(current_episode_dict[-1])  # Deserialize the dictionary back into an Episode object
         return None
     
     def get_similar_episodes(self, episode, best_k = 5):
+        if not self.get_memory_count():
+            return None
         embedding = get_text_embedding(str(episode))
-        episode_ids = self.embeddings_store.get_similar_embeddings(embedding, best_k)
+        episode_ids, distances = self.embeddings_store.get_similar_embeddings(embedding, best_k)
         episodes = [Episode.model_validate(self.memory_index.get_episode(episode_id)) for episode_id in episode_ids]
         return episodes
     
@@ -76,6 +78,9 @@ class MemoryIndex:
         """Retrieve all episodes from the database."""
         return self.db.all()
     
+    def truncate(self):
+        return self.db.truncate()
+    
 
 class EmbeddingsStore:
     def __init__(self, index_path='faiss_index.bin', dimension=1536):
@@ -99,5 +104,5 @@ class EmbeddingsStore:
         """Retrieve the most similar episodes based on the embedding."""
         embedding_array = np.array([embedding]).astype('float32')
         distances, episode_id = self.index.search(embedding_array, best_k)
-        return episode_id[0]
+        return episode_id[0], distances[0]
     

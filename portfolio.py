@@ -25,7 +25,7 @@ class Transaction(BaseModel):
                 f"Action: {self.transaction_type.upper()} {self.symbol} @ "
                 f"{self.price:.2f} EUR x {self.quantity:.4f} shares = {self.total_value:.2f}| "
                 f"Cash after: {self.cash_after_transaction:.2f} | "
-                f"Comment: {self.comment})")
+                f"Comment: {self.comment}")
 
 class TransactionHistory(BaseModel):
     history: List[Transaction] = Field(default_factory=list)
@@ -203,6 +203,10 @@ class Portfolio(BaseModel):
                         comment=comment
                     )
                 )
+        
+    def wait(self):
+        """dummy function to allow for streamlined function call execution"""
+        return None
         
     def close_position(self, symbol: str) -> dict:
         """Sells all shares of a position at the current market price."""

@@ -2,30 +2,42 @@ from portfolio import Portfolio, Position, Transaction
 
 from jinja2 import Template
 import faiss
-
+import inspect
 from typing import Optional
-
+import json
 from news import NewsApiCustomClient, WorldNewsCustomClient
 from datetime import datetime
 import yaml
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 
-from memory.memorymodel import Episode, Experience, Reflection
+from memory.memorymodel import Episode, Experience, Reflection, ReflectionOutput, Perception, Action, ActionType
 from memory.stores import MemoryController
+from llm_utils import query_llm_with_tools, query_llm_with_structured_output
 
-# Flow 1 Prompt: "Learning"
+setting_prompt = str("You are a trading bot and financial expert.\n\n"
+    "Your goal is to maximize your portfolio's value.\n"
+    "Your current plan is: Buy shares when the news indicate a good buying opportunity, sell shares when the news indicate upcoming falling prices.\n"
+    "You make memories while trading. Each memory contains two parts:"
+    "the 'Experience'-part encompassing"
+    "(A1) the news of the day"
+    "(A2) the trading decision you made [BUY, SELL, WAIT]"
+    "(A3) your portfolio at the time (after executing the trading decision)"
+    "(A4) a statement on your expectations at the time\n\n"
+    "Additionally a memory has a 'Reflection'-part encompassing"
+    "(B1) an evaluation of your expectation at a later timestamp"
+    "(B2) a learning, drawn from comparing the expectation with it's evaluation. The goal is to draw helpful learnings that increase your trading abilities in the future")
+    
+# Flow 1 Prompt: "Learning" = run_reflection
 flow_1_prompt_template = Template(
-    "You are a trading bot...\n\n"
-    "Your goal is ...\n"
-    "Your current plan is\n"
-    "You make memories while trading ...\n\n"
-    "Your latest memory is\n"
+    "{{setting_prompt}}"
+    "You are now given the opportunity to reflect on your latest action."
+    "Your latest memory's 'Experience'-part is\n"
     "{{latest_memory}}\n\n"
-    "Your current state is\n"
+    "Today's state of your Portfolio is\n"
     "{{portfolio}}\n"
     "{{transaction_history}}\n\n"
-    "You are now given the opportunity to reflect on your action. To do so, you must verbalize:\n"
+    "You must now verbalize the following to complete the memory's 'Reflection'-part:\n"
     "- An evaluation of your previous expectation: Given the now available information of your portfolio's development, "
     "ask yourself: 'Did things happen in the way you predicted them?'\n"
     "- A learning: A short statement that draws a conclusion from the experience that may be helpful for similar future situations.\n\n"
@@ -36,16 +48,12 @@ flow_1_prompt_template = Template(
     "}"
 )
 
-
-# Flow 2 Prompt: "Trading"
+# Flow 2 Prompt: "Trading" = run_action
 flow_2_prompt_template = Template(
-    "You are a trading bot...\n"
+    "{{setting_prompt}}"
     "It is {{ current_date.strftime('%A, %d of %B') }}\n"
     "Keep in mind the weekend as the exchanges are closed on Saturday and Sunday. "
     "As such, we do not expect any price changes during those days.\n\n"
-    "Your goal is ...\n"
-    "Your current plan is\n"
-    "You make memories while trading ...\n\n"
     "Your current state is\n"
     "{{portfolio}}\n"
     "{{transaction_history}}\n\n"
@@ -117,6 +125,7 @@ action_flow_tools = [
                            "The amount paid for the purchase (equivalent to the 'buy_value') will be deducted from your cash account. "
                            "The action will fail if you do not have sufficient cash funds. "
                            "You must also provide an explanation of your decision in the form of an 'expectation'.",
+            "strict": True,
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -147,6 +156,7 @@ action_flow_tools = [
                            "The amount gained from the sale (equivalent to the 'sell_value') will be added to your cash account. "
                            "The action will fail if you do not hold a sufficiently large position of the symbol you aim to sell. "
                            "You must also provide an explanation of your decision in the form of an 'expectation'.",
+            "strict": True,
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -174,7 +184,17 @@ action_flow_tools = [
             "name": "wait",
             "description": "You are done trading for the day and decide not to take another BUY or SELL action. "
                         "This function shall be called whenever your portfolio does not need any changes at that moment.",
-            "parameters": {} 
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "expectation": {
+                        "type": "string",
+                        "description": "Short text to explain why you choose to wait. Write the expectation in a way that it can be evaluated in the future to determine if it was correct or wrong."
+                    }
+                },
+                "required": ["expectation"],
+                "additionalProperties": False
+            }
         }
     }
 ]
@@ -225,7 +245,7 @@ class Agent:
         # Update metrics
         self.state_data['last_run'] = datetime.now().isoformat()
         self.state_data['metrics']['memories'] = len(self.memory_controller.memory_index.db)
-        self.state_data['metrics']['current_portfolio_value'] = self.portfolio.total_value
+        self.state_data['metrics']['portfolio_value'] = self.portfolio.portfolio_value
         self.state_data['metrics']['total_trades'] = len(self.portfolio.transaction_history)
 
         # Save main state file
@@ -263,7 +283,7 @@ class Agent:
     def update_portfolio_metrics(self):
         """Update portfolio-related metrics based on current portfolio state."""
         if self.portfolio:
-            self.update_metric('current_portfolio_value', self.portfolio.portfolio_value)
+            self.update_metric('portfolio_value', self.portfolio.portfolio_value)
     
     @classmethod
     def create_new(cls, 
@@ -302,7 +322,7 @@ class Agent:
             'metrics': {
                 'total_trades': 0,
                 'memories': 0,
-                'current_portfolio_value': initial_portfolio_value,
+                'portfolio_value': initial_portfolio_value,
                 'start_portfolio_value': initial_portfolio_value
             }
         }
@@ -320,40 +340,107 @@ class Agent:
         # Return new agent state instance
         return cls(str(config_path))
         
+    def execute_tool_call(self, completion) -> Action:
+        tool_calls = completion.choices[0].message.tool_calls
+        if not tool_calls:
+            raise ValueError("No tool calls found in completion response.")
         
-    def action(self):
-        pass
-        
+        tool_call = tool_calls[0]
+        method_name = tool_call.function.name
+        args = json.loads(tool_call.function.arguments)
+
+        method = getattr(self.portfolio, method_name)
+        sig = inspect.signature(method)
+        valid_args = {k: v for k, v in args.items() if k in sig.parameters}
+        transaction = method(**valid_args)
+
+        action = Action(action_type=ActionType.from_str(method_name),
+                        transaction=transaction,
+                        expectation=args["expectation"])
+        return action
+
+
+    def run_action(self):
+        print("-Action-")
         # get news summary
+        news = self.news_client.get_daily_news_summary("AAPL")
+        news += "\n"+self.world_news_client.get_daily_news_summary("AAPL")
+        print(f"Retrieved news: {news[:100]}...(truncated)")
         
         # create new episode 
+        experience = Experience(date=datetime.now(),
+                        perception= Perception(
+                            news_of_the_day=news,
+                            portfolio=self.portfolio,
+                        ))
+        episode = Episode(experience=experience)
         
         # get similar episodes
+        similar_episodes = self.memory_controller.get_similar_episodes(episode, best_k=1) 
+        similar_episodes_str = "\n".join([f"Memory {i+1}:\n{s}" for i, s in enumerate(similar_episodes)]) if similar_episodes else "no memories yet"
+        print(f"Retrieved similar episodes: {similar_episodes_str[:100]}...(truncated)")
         
         # choose action
+        flow_2_prompt = flow_2_prompt_template.render(setting_prompt=setting_prompt,
+                    current_date=datetime.now(),
+                    portfolio=str(self.portfolio),
+                    transaction_history = str(self.portfolio.transaction_history),
+                    symbols_of_interest = str(self.symbols_of_interest),
+                    news_summaries = news,
+                    memories = similar_episodes_str)
+        
+        completion, cost = query_llm_with_tools(flow_2_prompt, tools=action_flow_tools)
         
         # run action
-        
+        action = self.execute_tool_call(completion)
+        print(f"Chose action: {str(action.action_type)}")
+
         # save current episode
+        episode.experience.action = action
+        self.memory_controller.save_current_episode(episode)
+        print(f"Saved current episode:\n{str(episode)}")
         
-    
-    def reflection(self):
+        self.save_state()
+        
+        
+    def run_reflection(self):
         pass
-        
+        print("-Reflection-")
         # update portfolio
-        
+        self.portfolio.update()
+
         # get latest experience
-        
+        episode = self.memory_controller.get_current_episode()
+        if not episode:
+            print("No current episode to reflect upon")
+            return
+        print(f"Loaded current episode")
+
         # evaluate experience
+        flow_1_prompt = flow_1_prompt_template.render(setting_prompt=setting_prompt,
+                            latest_memory=str(episode),
+                            portfolio=str(self.portfolio),
+                            transaction_history = str(self.portfolio.transaction_history))
         
-        # update experience in index
+        completion, cost = query_llm_with_structured_output(flow_1_prompt, response_format=ReflectionOutput)
+        print(f"Generated reflection")
+
+        # instanciate reflection object
+        posterior_position = self.portfolio.positions.get(episode.experience.action.transaction.symbol) if episode.experience.action.transaction else None
+        reflection = Reflection(posterior_position=posterior_position,
+                        expectation_evaluation=completion.expectation_evaluation,
+                        learning=completion.learning)
         
-        # create and save embeddings of experience
-        
+        episode.reflection = reflection
+
+        # create and save embeddings of finished episode
+        self.memory_controller.save_finished_episode(episode)
+        print(f"Saved finished episode:\n{str(episode)}")
+
         
     def run(self):
-        self.reflection()
-        self.action()
+        self.run_reflection()
+        self.run_action()
 
 
 
@@ -375,7 +462,7 @@ if __name__ == "__main__":
     # Access properties
     print(f"Agent: {agent_state.agent_name}")
     print(f"Symbols: {agent_state.symbols_of_interest}")
-    print(f"Portfolio value: {agent_state.get_metric('current_portfolio_value')}")
+    print(f"Portfolio value: {agent_state.get_metric('portfolio_value')}")
     
     # Update metrics
     agent_state.update_metric("total_trades", 1)

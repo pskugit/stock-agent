@@ -1,12 +1,25 @@
 from pydantic import BaseModel
 from portfolio import Portfolio, Position, Transaction
-
+from enum import Enum
 from typing import Optional
-
+import json
 from datetime import datetime
 from typing import Optional
 
 from uuid import uuid4
+
+class ActionType(str, Enum):
+    BUY = "BUY"
+    SELL = "SELL"
+    WAIT = "WAIT"
+
+    @classmethod
+    def from_str(cls, value: str) -> "ActionType":
+        try:
+            return cls[value.upper()]
+        except KeyError:
+            raise ValueError(f"Invalid action type: {value}. Must be one of {', '.join(cls.__members__.keys())}")
+
 
 class Perception(BaseModel):
     news_of_the_day: str
@@ -16,6 +29,7 @@ class Action(BaseModel):
     action_type: str
     transaction: Optional[Transaction] = None
     expectation: str
+
 
 class Experience(BaseModel):
     date: datetime
@@ -33,6 +47,10 @@ class Experience(BaseModel):
         ]
         return "\n\n".join(parts)
 
+class ReflectionOutput(BaseModel):
+    expectation_evaluation: str
+    learning: str
+    
 class Reflection(BaseModel):
     posterior_position: Optional[Position] = None
     expectation_evaluation: str

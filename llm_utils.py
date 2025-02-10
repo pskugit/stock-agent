@@ -11,13 +11,26 @@ model_prices = {
     "o1-mini": (3, 12)
 }
 
+def query_llm_with_structured_output(prompt, response_format, model="gpt-4o-mini"):
+    chat_completion = openai.beta.chat.completions.parse(
+        model=model,
+        messages=[
+            {"role": "system", "content": prompt}
+        ],
+        response_format=response_format
+    )
+    cost = (chat_completion.usage.prompt_tokens * model_prices[model][0]) + (chat_completion.usage.completion_tokens * model_prices[model][1])
+    cost /= 1000000
+    return chat_completion.choices[0].message.parsed, cost
+    
 def query_llm_with_tools(prompt, tools, model="gpt-4o-mini"):
     chat_completion = openai.chat.completions.create(
         model=model,
         messages=[
             {"role": "system", "content": prompt}
         ],
-        tools=tools
+        tools=tools,
+        tool_choice="required"
     )
     cost = (chat_completion.usage.prompt_tokens * model_prices[model][0]) + (chat_completion.usage.completion_tokens * model_prices[model][1])
     cost /= 1000000
