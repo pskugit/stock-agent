@@ -33,7 +33,7 @@ def test_position_sell():
 # Test cases for Portfolio
 def test_portfolio_initialization():
     portfolio = Portfolio(initial_cash=10000)
-    assert portfolio.total_cash == 10000
+    assert portfolio.available_cash == 10000
     assert portfolio.get_portfolio_value() == 10000
     assert portfolio.show_positions() == []
     assert portfolio.show_transaction_history() == []
@@ -41,7 +41,7 @@ def test_portfolio_initialization():
 def test_portfolio_add_symbol():
     portfolio = Portfolio(initial_cash=10000)
     portfolio.buy("AAPL", price=150.0, amount=10)
-    assert portfolio.total_cash == 8500.0
+    assert portfolio.available_cash == 8500.0
     assert len(portfolio.positions) == 1
     assert portfolio.positions["AAPL"].amount == 10
     assert portfolio.positions["AAPL"].buy_price == 150.0
@@ -50,7 +50,7 @@ def test_portfolio_remove_symbol():
     portfolio = Portfolio(initial_cash=10000)
     portfolio.buy("AAPL", price=150.0, amount=10)
     portfolio.sell("AAPL", price=160.0, amount=5)
-    assert portfolio.total_cash == 9300.0
+    assert portfolio.available_cash == 9300.0
     assert portfolio.positions["AAPL"].amount == 5
     with pytest.raises(ValueError):
         portfolio.sell("AAPL", price=160.0, amount=10)  # Selling more than available

@@ -1,55 +1,34 @@
-import market
-import os
 import json
+import market
 from datetime import datetime
-from pydantic_core import core_schema
+from pydantic import BaseModel, Field, computed_field, model_validator
+from datetime import datetime
+from typing import List, Dict
 
-class Transaction:
-    def __init__(self, transaction_type: str, symbol: str, price: float, quantity: float, cash_after_transaction: float, comment: str = ""):
-        """Represents a single transaction."""
-        self.time = datetime.now()
-        self.transaction_type = transaction_type
-        self.symbol = symbol
-        self.price = price
-        self.quantity = quantity
-        self.total_value = price * quantity
-        self.cash_after_transaction = cash_after_transaction
-        self.comment = comment
-        
-    def to_dict(self, formatted: bool = True):
-        """Returns the transaction details as a dictionary."""
-        return {
-            'time': self.time.strftime('%Y-%m-%d %H:%M:%S') if formatted else self.time,
-            'type': self.transaction_type,
-            'symbol': self.symbol,
-            'price': self.price,
-            'quantity': self.quantity,
-            'total_value': self.total_value,
-            'cash_after_transaction': self.cash_after_transaction,
-            'comment': self.comment
-        }
+class Transaction(BaseModel):
+    time: datetime = Field(default_factory=datetime.now)
+    transaction_type: str
+    symbol: str
+    price: float = Field(ge=0)  # greater or equal to 0
+    quantity: float = Field(ge=0)
+    cash_after_transaction: float = Field(ge=0)
+    comment: str = ""
+    
+    @computed_field
+    @property
+    def total_value(self) -> float:
+        return self.price * self.quantity
 
-    @classmethod
-    def from_dict(cls, data):
-        """Creates a Transaction instance from a dictionary."""
-        return cls(
-            transaction_type=data['type'],
-            symbol=data['symbol'],
-            price=data['price'],
-            quantity=data['quantity'],
-            cash_after_transaction=data['cash_after_transaction'],
-            comment=data.get('comment', ""),
-            time=datetime.strptime(data['time'], '%Y-%m-%d %H:%M:%S') if isinstance(data['time'], str) else data['time']
-        )
-        
     def __str__(self):
         """Return a human-readable string representation of the transaction."""
-        return f"Time: {self.time.strftime('%Y-%m-%d %H:%M:%S')} | Action: {self.transaction_type.upper()} {self.symbol} @ {self.price:.2f} EUR x {self.quantity:.4f} shares | Cash after: {self.cash_after_transaction:.2f} | Comment: {self.comment})"
+        return (f"Time: {self.time.strftime('%Y-%m-%d %H:%M:%S')} | "
+                f"Action: {self.transaction_type.upper()} {self.symbol} @ "
+                f"{self.price:.2f} EUR x {self.quantity:.4f} shares = {self.total_value:.2f}| "
+                f"Cash after: {self.cash_after_transaction:.2f} | "
+                f"Comment: {self.comment})")
 
-
-class TransactionHistory:
-    def __init__(self):
-        self.history = []
+class TransactionHistory(BaseModel):
+    history: List[Transaction] = Field(default_factory=list)
 
     def log(self, transaction: Transaction = None, **kwargs):
         """
@@ -62,33 +41,24 @@ class TransactionHistory:
         """
         if transaction is None:
             # Create a transaction object from provided arguments
-            transaction = Transaction(
-                transaction_type=kwargs.get('transaction_type'),
-                symbol=kwargs.get('symbol'),
-                price=kwargs.get('price'),
-                quantity=kwargs.get('quantity'),
-                cash_after_transaction=kwargs.get('cash_after_transaction'),
-                comment=kwargs.get('comment', "")
-            )
+            transaction = Transaction.model_validate(kwargs)
         
         self.history.append(transaction)
         return transaction
-
-    def to_dict(self):
-        return {"history": [tx.dict() for tx in self.history]}
-
-    @classmethod
-    def from_dict(cls, data):
-        history = [Transaction(**tx) for tx in data.get("history", [])]
-        return cls(history=history)
     
-    def get_history(self, formatted: bool = True):
-        """Returns the transaction history. Optionally formats the timestamps."""
-        return [tx.to_dict(formatted) for tx in self.history]
+    def get_history(self) -> List[Transaction]:
+        """Returns the transaction history as a list of Transaction objects."""
+        return self.history
 
     def clear(self):
         """Clears the transaction history."""
-        self.history = []
+        self.history.clear()
+    
+    def __iter__(self):
+        return (txn for txn in self.history)
+    
+    def __getitem__(self, item):
+        return self.history[item]
 
     def __str__(self):
         """Returns a formatted string representation of all transactions."""
@@ -96,28 +66,34 @@ class TransactionHistory:
             return "No transactions recorded."
         return "\n".join(str(txn) for txn in self.history)
     
+    def __len__(self):
+        return len(self.history)
+    
 
-class Position:
-    def __init__(self, symbol: str, price: float, quantity: float):
-        self.symbol = symbol
-        self.buy_price = price
-        self.quantity = quantity
-        self.position_value = price * quantity
-        self.last_update_price = price
-        self.absolute_change_since_start = 0.0
-        self.relative_change_since_start = 0.0
-        self.absolute_change_since_update = 0.0
-        self.relative_change_since_update = 0.0
-        self.last_update_time = datetime.now()
+class Position(BaseModel):
+    symbol: str
+    buy_price: float = Field(ge=0)
+    quantity: float = Field(ge=0)
+    last_update_price: float = Field(ge=0)
+    last_update_time: datetime = Field(default_factory=datetime.now)
+
+    absolute_change_since_start: float = 0.0
+    relative_change_since_start: float = 0.0
+    absolute_change_since_update: float = 0.0
+    relative_change_since_update: float = 0.0
+
+    @computed_field
+    @property
+    def position_value(self) -> float:
+        return self.last_update_price * self.quantity
 
     def update_position(self, new_price: float):
         """Update position values based on the new market price."""
         self.absolute_change_since_start = (new_price - self.buy_price) * self.quantity
-        self.relative_change_since_start = ((new_price - self.buy_price) / self.buy_price)
+        self.relative_change_since_start = (new_price - self.buy_price) / self.buy_price
         self.absolute_change_since_update = (new_price - self.last_update_price) * self.quantity
-        self.relative_change_since_update = ((new_price - self.last_update_price) / self.last_update_price)
+        self.relative_change_since_update = (new_price - self.last_update_price) / self.last_update_price
         self.last_update_price = new_price
-        self.position_value = self.last_update_price * self.quantity
         self.last_update_time = datetime.now()
 
     def buy(self, price: float, quantity: float):
@@ -132,10 +108,8 @@ class Position:
         if quantity > self.quantity:
             raise ValueError(f"Cannot sell {quantity} quantity; only {self.quantity} available.")
         self.quantity -= quantity
-        if self.quantity == 0:
-            self.buy_price = 0  # Reset if no quantity remain
         self.update_position(price)
-        
+
     def __str__(self):
         """Return a human-readable string representation of the position."""
         return (f"Symbol: {self.symbol}, Total Value: {self.position_value:.2f}, "
@@ -145,217 +119,149 @@ class Position:
                 f"Rel Change Since Start: {self.relative_change_since_start:.2%}, ")
 
 
-class Portfolio:
-    def __init__(self, initial_cash: float):
-        self.initial_cash = initial_cash
-        self.total_cash = initial_cash
-        self.positions = {}
-        self.transaction_history = TransactionHistory()
-        self.portfolio_value = initial_cash
-        self.absolute_change_since_start = 0.0
-        self.relative_change_since_start = 0.0
-        self.absolute_change_since_update = 0.0
-        self.relative_change_since_update = 0.0
-        self.last_update_time = datetime.now()
+class Portfolio(BaseModel):
+    initial_cash: float = 0.0
+    available_cash: float = 0.0
+    positions: Dict[str, Position] = Field(default_factory=dict)
+    transaction_history: TransactionHistory = Field(default_factory=TransactionHistory)
+    absolute_change_since_start: float = 0.0
+    relative_change_since_start: float = 0.0
+    absolute_change_since_update: float = 0.0
+    relative_change_since_update: float = 0.0
+    last_update_time: datetime = Field(default_factory=datetime.now)
     
-    def __get_pydantic_core_schema__(self, handler):
-        """
-        Define how Pydantic should serialize and validate this class.
-        """
-        return core_schema.typed_dict(
-            {
-                "initial_cash": core_schema.float_schema(),
-                "total_cash": core_schema.float_schema(),
-                "positions": core_schema.dict_schema(),
-                "transaction_history": core_schema.list_schema(core_schema.dict_schema()),  # Transactions stored as a list of dicts
-                "portfolio_value": core_schema.float_schema(),
-                "absolute_change_since_start": core_schema.float_schema(),
-                "relative_change_since_start": core_schema.float_schema(),
-                "absolute_change_since_update": core_schema.float_schema(),
-                "relative_change_since_update": core_schema.float_schema(),
-                "last_update_time": core_schema.str_schema(),  # Store as ISO format string
-            }
-        )
-    
-    def buy(self, symbol: str, investment_amount: float) -> dict:
-        """Invest a specified amount into a position, automatically determining the price and quantity."""
+    @computed_field
+    @property
+    def portfolio_value(self) -> float:
+        """Calculate the total portfolio value."""
+        return sum(pos.position_value for pos in self.positions.values()) + self.available_cash
+
+    def load_cash(self, cash_amount):
+        self.initial_cash += cash_amount
+        self.available_cash += cash_amount
+        return self.initial_cash, self.available_cash
+        
+    def buy(self, symbol: str, buy_value: float) -> dict:
+        """Invest a specified amount into a position."""
         comment = ""
         price = market.get_price_for_symbol(symbol)
-        if price is None or price <= 0 or not isinstance(price, (int, float)):
+        if price is None or price <= 0:
             raise ValueError("Invalid price retrieved for the symbol.")
-        shares_to_buy = investment_amount / price
-        if investment_amount > self.total_cash:
+        shares_to_buy = buy_value / price
+        if buy_value > self.available_cash:
             raise ValueError("Not enough cash to complete the transaction.")
-        self.total_cash -= investment_amount
+        self.available_cash -= buy_value
         if symbol in self.positions:
             self.positions[symbol].buy(price, shares_to_buy)
         else:
-            self.positions[symbol] = Position(symbol, price, shares_to_buy)
+            self.positions[symbol] = Position(
+                symbol=symbol,
+                buy_price=price,
+                quantity=shares_to_buy,
+                last_update_price=price
+            )
             comment = "position opened"
+            
+        return self.transaction_history.log(
+            transaction=Transaction(
+                transaction_type="BUY",
+                symbol=symbol,
+                price=price,
+                quantity=shares_to_buy,
+                cash_after_transaction=self.available_cash,
+                comment=comment
+            )
+        )
         
-        return self.transaction_history.log(transaction_type='BUY',
-                                            symbol = symbol,
-                                            price = price,
-                                            quantity = shares_to_buy, 
-                                            cash_after_transaction = self.total_cash,
-                                            comment = comment)
-
-    def sell(self, symbol: str, liquidation_amount: float) -> dict:
-        """Sell a specified cash value from an existing position, automatically determining the price and quantity."""
+    def sell(self, symbol: str, sell_value: float) -> dict:
+        """Sell a specified cash value from an existing position."""
         comment = ""
         if symbol not in self.positions:
             raise ValueError(f"No position found for symbol {symbol}.")
-        
         price = market.get_price_for_symbol(symbol)
-        if price is None or price <= 0 or not isinstance(price, (int, float)):
+        if price is None or price <= 0:
             raise ValueError("Invalid price retrieved for the symbol.")
-        
         position = self.positions[symbol]
-        shares_to_sell = liquidation_amount / price
-        if shares_to_sell > position.quantity:
+        shares_to_sell = sell_value / price
+        if round(shares_to_sell, 6) > round(position.quantity, 6):
             raise ValueError("Not enough quantity to complete the transaction.")
-        
         position.sell(price, shares_to_sell)
-        self.total_cash += liquidation_amount
-        
+        self.available_cash += sell_value
         if position.quantity * price < 1:
-            del self.positions[symbol]  # Remove the position if it is fully sold
-            self.total_cash += position.quantity * price
-            comment = "position closed"
             shares_to_sell = position.quantity
-
-        return self.transaction_history.log(transaction_type='SELL',
-                                            symbol = symbol,
-                                            price = price,
-                                            quantity = shares_to_sell, 
-                                            cash_after_transaction = self.total_cash,
-                                            comment = comment)
-
-    def close_position(self, symbol):
+            sell_value = shares_to_sell * price
+            self.available_cash += sell_value
+            comment = "position closed"
+            del self.positions[symbol]
+        return self.transaction_history.log(
+                    transaction=Transaction(
+                        transaction_type="SELL",
+                        symbol=symbol,
+                        price=price,
+                        quantity=shares_to_sell,
+                        cash_after_transaction=self.available_cash,
+                        comment=comment
+                    )
+                )
+        
+    def close_position(self, symbol: str) -> dict:
         """Sells all shares of a position at the current market price."""
         if symbol not in self.positions:
             raise ValueError(f"No position found for symbol {symbol}.")
-
-        quantity = self.positions[symbol].quantity
+        position = self.positions.pop(symbol)
         price = market.get_price_for_symbol(symbol)
+        self.available_cash += price * position.quantity
+        return self.transaction_history.log(
+                        transaction=Transaction(
+                            transaction_type="SELL",
+                            symbol=symbol,
+                            price=price,
+                            quantity=position.quantity,
+                            cash_after_transaction=self.available_cash,
+                            comment="position_closed"
+                        )
+                    )
         
-        self.total_cash += price * quantity
-        del self.positions[symbol]
-        
-        return self.transaction_history.log(transaction_type='SELL',
-                                    symbol = symbol,
-                                    price = price,
-                                    quantity = quantity, 
-                                    cash_after_transaction = self.total_cash,
-                                    comment = "position closed")
-
     def update(self):
         """Update all positions and portfolio-level metrics."""
+        previous_value = self.portfolio_value 
         for position in self.positions.values():
-            position.update_position(market.get_price_for_symbol(position.symbol))  # Assuming prices are updated externally
-        new_portfolio_value = self._get_portfolio_value()
-        if self.portfolio_value > 0:
-            self.absolute_change_since_update = new_portfolio_value - self.portfolio_value
-            self.relative_change_since_update = ((new_portfolio_value - self.portfolio_value) / self.portfolio_value)
-            self.absolute_change_since_start = new_portfolio_value - self.initial_cash
-            self.relative_change_since_start = (new_portfolio_value - self.initial_cash) / self.initial_cash
-        else:
-            self.absolute_change_since_update = 0.0
-            self.relative_change_since_update = 0.0
-        self.portfolio_value = new_portfolio_value
+            new_price = market.get_price_for_symbol(position.symbol)
+            if new_price and new_price > 0:
+                position.update_position(new_price)
+            else:
+                raise ValueError("Received faulty price data")
+        self.absolute_change_since_update = self.portfolio_value - previous_value
+        self.relative_change_since_update = (self.portfolio_value - previous_value) / previous_value
+        self.absolute_change_since_start = self.portfolio_value - self.initial_cash
+        self.relative_change_since_start = (self.portfolio_value - self.initial_cash) / self.initial_cash
         self.last_update_time = datetime.now()
 
-    def _get_portfolio_value(self) -> float:
-        """Calculate the total portfolio value."""
-        total_investment_value = sum(pos.position_value for pos in self.positions.values())
-        return total_investment_value + self.total_cash
-
-    def positions_to_str(self):
+    def positions_to_str(self) -> str:
         """Return a summary of all current positions."""
+        if not self.positions:
+            return "No active positions."
         return "\n".join(str(position) for position in self.positions.values())
-
-    def metrics_to_dict(self):
-        """Return portfolio-level metrics."""
-        return {
-            "total_portfolio_value": self.portfolio_value,
-            "total_cash": self.total_cash,
-            "invested_amount": self.portfolio_value - self.total_cash,
-            "absolute_change_since_start": self.absolute_change_since_start,
-            "relative_change_since_start": self.relative_change_since_start,
-            "absolute_change_since_update": self.absolute_change_since_update,
-            "relative_change_since_update": self.relative_change_since_update,
-            "last_update_time": self.last_update_time,
-        }
-
-    def show_transaction_history(self):
-        """Return the transaction history."""
-        return self.transaction_history.get_history(formatted=True)
-
+    
     def __str__(self):
-        """Return a human-readable string representation of the portfolio."""
-        metrics = self.metrics_to_dict()
-        header = (f"Portfolio Summary - {metrics['last_update_time'].strftime('%Y-%m-%d %H:%M:%S')}\n"
-                f"Total Value: {metrics['total_portfolio_value']:.2f}\n"
-                f"Total Cash: {metrics['total_cash']:.2f}\n"
-                f"Invested Amount: {metrics['invested_amount']:.2f}\n"
-                f"Absolute Change Since Start: {metrics['absolute_change_since_start']:.2f}\n"
-                f"Relative Change Since Start: {metrics['relative_change_since_start']:.2%}\n"
-                f"{'-' * 50}\n"
-                f"Positions:\n")
+        """Return a human-readable summary of the portfolio."""
+        summary = (
+            f"Portfolio Summary ({self.last_update_time.strftime('%Y-%m-%d %H:%M:%S')}):\n"
+            f"Total Value: {self.portfolio_value:.2f}\n"
+            f"Cash: {self.available_cash:.2f}\n"
+            f"Invested: {self.portfolio_value - self.available_cash:.2f}\n"
+            f"Absolute Change Since Start: {self.absolute_change_since_start:.2f}\n"
+            f"Relative Change Since Start: {self.relative_change_since_start:.2%}\n"
+            f"{'-' * 60}\n"
+        )            
+        return summary + self.positions_to_str()
 
-        positions_str = "\n".join(str(position) for position in self.positions.values())
-
-        return header + (positions_str if positions_str else "No active positions")
-
+    def to_file(self, filename):
+        with open(filename, 'w') as f:
+            f.write(self.model_dump_json())
     
-    def to_dict(self):
-        """Converts the Portfolio to a dictionary format."""
-        return {
-            "initial_cash": self.initial_cash,
-            "total_cash": self.total_cash,
-            "positions": {symbol: vars(pos) for symbol, pos in self.positions.items()},  # Assuming Position class
-            "portfolio_value": self.portfolio_value,
-            "absolute_change_since_start": self.absolute_change_since_start,
-            "relative_change_since_start": self.relative_change_since_start,
-            "absolute_change_since_update": self.absolute_change_since_update,
-            "relative_change_since_update": self.relative_change_since_update,
-            "last_update_time": self.last_update_time.isoformat(),
-            "transaction_history": self.transaction_history.to_dict(),  # Converts transaction history to dict
-        }
-
     @classmethod
-    def from_dict(cls, data):
-        """Reconstructs a Portfolio instance from a dictionary."""
-        portfolio = cls(data["initial_cash"])
-        portfolio.total_cash = data["total_cash"]
-        portfolio.positions = data["positions"]  # This may need a `Position.from_dict`
-        portfolio.portfolio_value = data["portfolio_value"]
-        portfolio.absolute_change_since_start = data["absolute_change_since_start"]
-        portfolio.relative_change_since_start = data["relative_change_since_start"]
-        portfolio.absolute_change_since_update = data["absolute_change_since_update"]
-        portfolio.relative_change_since_update = data["relative_change_since_update"]
-        portfolio.last_update_time = datetime.fromisoformat(data["last_update_time"])
-        portfolio.transaction_history = TransactionHistory.from_dict(data["transaction_history"])
-        return portfolio
-    
-    def to_json(self, filepath: str = None) -> str:
-        """Serializes the Portfolio to a JSON string or saves it to a file."""
-        json_data = json.dumps(self.to_dict(), indent=2)
-        
-        if filepath:
-            with open(filepath, 'w') as f:
-                f.write(json_data)
-            return filepath
-        
-        return json_data
-
-    @classmethod
-    def from_json(cls, json_input: str) -> 'Portfolio':
-        """Deserializes Portfolio from a JSON string or file."""
-        if os.path.exists(json_input):
-            with open(json_input, 'r') as f:
-                data = json.load(f)
-        else:
-            data = json.loads(json_input)
-        
-        return cls.from_dict(data)
+    def from_file(cls, filename) -> 'Portfolio':
+        with open(filename, 'r') as f:
+            pf_dict = json.loads(f.read())
+        return cls.model_validate(pf_dict)

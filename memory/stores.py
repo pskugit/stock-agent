@@ -2,27 +2,29 @@
 from tinydb import TinyDB, Query
 import faiss
 import numpy as np
-from typing import List
-
+from pathlib import Path
+import os
+import json
 from llm_utils import get_text_embedding
-from agent import Episode
+from memory.memorymodel import Episode
 
 class MemoryController:
-    def __init__(self):
-        self.memory_index = MemoryIndex()
-        self.embeddings_store = EmbeddingsStore()
-        self.current_episode_store = TinyDB('current_episode_store.json')  # Separate store for incomplete episodes
+    def __init__(self, agent_name: str):
+        self.local_path = Path("agents") / agent_name
+        os.makedirs(self.local_path, exist_ok = True)
+        self.memory_index = MemoryIndex(db_path= self.local_path / "memory_index.json")
+        self.embeddings_store = EmbeddingsStore(index_path= self.local_path / "faiss_index.bin")
+        self.current_episode_store = TinyDB(self.local_path  / 'current_episode_store.json')  # Separate store for incomplete episodes
 
     def save_current_episode(self, episode):
         """Save the current (incomplete) episode to the current_episode_store."""
-        episode_dict = episode.to_dict()
+        episode_dict = json.loads(episode.model_dump_json())
         self.current_episode_store.insert(episode_dict)
 
-    def finalize_current_episode(self, episode):
+    def save_episode(self, episode, remove_current=False):
         """Finalize the current episode by moving it to the main memory index and generating an embedding."""
         # Save the finalized episode to the main memory index
-        episode_dict = episode.to_dict()
-        episode_id = self.memory_index.save_episode(episode_dict)
+        episode_id = self.memory_index.save_episode(episode)
         
         # Generate an embedding for the finalized episode
         episode_str = str(episode)  # Use string representation for embedding
@@ -32,24 +34,34 @@ class MemoryController:
         self.embeddings_store.save_embedding(embedding, episode_id)
         
         # Remove the episode from the current_episode_store using its unique_id
-        self.current_episode_store.remove(Query().unique_id == episode.unique_id)
+        if remove_current:
+            self.current_episode_store.remove(Query().unique_id == episode.unique_id)
 
     def get_current_episode(self):
         """Retrieve the current (incomplete) episode."""
         current_episode_dict = self.current_episode_store.all()
         if current_episode_dict:
-            return Episode(**current_episode_dict[0])  # Deserialize the dictionary back into an Episode object
+            return Episode.model_validate(current_episode_dict[0])  # Deserialize the dictionary back into an Episode object
         return None
     
+    def get_similar_episodes(self, episode, best_k = 5):
+        embedding = get_text_embedding(str(episode))
+        episode_ids = self.embeddings_store.get_similar_embeddings(embedding, best_k)
+        episodes = [Episode.model_validate(self.memory_index.get_episode(episode_id)) for episode_id in episode_ids]
+        return episodes
     
+    def get_memory_count(self):
+        return len(self.memory_index.db)
+
 
 class MemoryIndex:
     def __init__(self, db_path='memory_index.json'):
         self.db = TinyDB(db_path)
         self.EpisodeQuery = Query()
 
-    def save_episode(self, episode_dict):
+    def save_episode(self, episode):
         """Save the episode dictionary to the database."""
+        episode_dict = json.loads(episode.model_dump_json())
         return self.db.insert(episode_dict)
 
     def get_episode(self, episode_id):
@@ -65,24 +77,27 @@ class MemoryIndex:
         return self.db.all()
     
 
-
 class EmbeddingsStore:
-    def __init__(self, index_path='faiss_index.bin', dimension=768):
+    def __init__(self, index_path='faiss_index.bin', dimension=1536):
         self.dimension = dimension
         self.index_path = index_path
         try:
-            self.index = faiss.read_index(index_path)
+            self.index = faiss.read_index(str(index_path))
+            print(f"EmbeddingsStore: loading existing faiss index from {index_path}")
         except:
+            print(f"EmbeddingsStore: creating new faiss index")
             self.index = faiss.IndexFlatL2(dimension)
+            self.index = faiss.IndexIDMap(self.index)            
 
     def save_embedding(self, embedding, episode_id):
         """Save an embedding to the FAISS index."""
-        embedding_array = np.array([embedding]).astype('float32')
-        self.index.add(embedding_array)
-        faiss.write_index(self.index, self.index_path)
+        embedding_array = np.array([embedding])
+        self.index.add_with_ids(embedding_array, episode_id)
+        faiss.write_index(self.index, str(self.index_path))
 
-    def get_similar_episodes(self, embedding, best_k=5):
+    def get_similar_embeddings(self, embedding, best_k=5):
         """Retrieve the most similar episodes based on the embedding."""
         embedding_array = np.array([embedding]).astype('float32')
-        distances, indices = self.index.search(embedding_array, best_k)
-        return indices[0]
+        distances, episode_id = self.index.search(embedding_array, best_k)
+        return episode_id[0]
+    

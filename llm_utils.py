@@ -11,6 +11,18 @@ model_prices = {
     "o1-mini": (3, 12)
 }
 
+def query_llm_with_tools(prompt, tools, model="gpt-4o-mini"):
+    chat_completion = openai.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": prompt}
+        ],
+        tools=tools
+    )
+    cost = (chat_completion.usage.prompt_tokens * model_prices[model][0]) + (chat_completion.usage.completion_tokens * model_prices[model][1])
+    cost /= 1000000
+    return chat_completion, cost
+
 def query_llm(prompt, model="gpt-4o-mini"):
     chat_completion = openai.chat.completions.create(
         model=model,
@@ -24,7 +36,13 @@ def query_llm(prompt, model="gpt-4o-mini"):
     return chat_completion.choices[0].message.content, cost
         
         
-        
+def get_text_embedding(input):
+    response = openai.embeddings.create(
+          model="text-embedding-3-small",
+          input=input
+      )
+    return response.data[0].embedding  
+   
 # Example usage
 #prompt = "This is an initial testprompt. Please answer with 'OK'" #create_prompt(agent_state, environment_data)
 #chat_completion = query_llm(prompt)

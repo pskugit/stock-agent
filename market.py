@@ -26,6 +26,7 @@ def get_price_for_symbol(symbol: str):
         return None
     if price <= 0:
         raise ValueError(f"Negative market price {price} for symbol {symbol}.")
+    print(f"Price is {price}")
     return price
 
 """
